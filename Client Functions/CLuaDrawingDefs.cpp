@@ -1187,12 +1187,21 @@ int CLuaDrawingDefs::DxCreateShader(lua_State* luaVM)
 int CLuaDrawingDefs::DxCreateRenderTarget(lua_State* luaVM)
 {
     //  element dxCreateRenderTarget( int sizeX, int sizeY [, int withAlphaChannel = false ] )
+    //  element dxCreateRenderTarget( int sizeX, int sizeY, SurfaceFormat surfaceFormat )
     CVector2D vecSize;
-    bool      bWithAlphaChannel;
+    bool      bWithAlphaChannel = false;
+    bool      bHasSurfaceFormat = false;
+    _D3DFORMAT surfaceFormat;
 
     CScriptArgReader argStream(luaVM);
     argStream.ReadVector2D(vecSize);
-    argStream.ReadBool(bWithAlphaChannel, false);
+    if (argStream.NextIsString())
+    {
+        argStream.ReadEnumString(surfaceFormat);
+        bHasSurfaceFormat = true;
+    }
+    else
+        argStream.ReadBool(bWithAlphaChannel, false);
 
     if (!argStream.HasErrors())
     {
@@ -1200,8 +1209,8 @@ int CLuaDrawingDefs::DxCreateRenderTarget(lua_State* luaVM)
         CResource* pParentResource = pLuaMain ? pLuaMain->GetResource() : NULL;
         if (pParentResource)
         {
-            CClientRenderTarget* pRenderTarget =
-                g_pClientGame->GetManager()->GetRenderElementManager()->CreateRenderTarget((uint)vecSize.fX, (uint)vecSize.fY, bWithAlphaChannel);
+            CClientRenderTarget* pRenderTarget = g_pClientGame->GetManager()->GetRenderElementManager()->CreateRenderTarget(
+                (uint)vecSize.fX, (uint)vecSize.fY, bHasSurfaceFormat, bWithAlphaChannel, surfaceFormat);
             if (pRenderTarget)
             {
                 // Make it a child of the resource's file root ** CHECK  Should parent be pFileResource, and element added to pParentResource's ElementGroup? **
@@ -1594,7 +1603,7 @@ int CLuaDrawingDefs::DxGetStatus(lua_State* luaVM)
         SDxStatus dxStatus;
         g_pCore->GetGraphics()->GetRenderItemManager()->GetDxStatus(dxStatus);
 
-        lua_createtable(luaVM, 0, 23);
+        lua_createtable(luaVM, 0, 24);
 
         lua_pushstring(luaVM, "TestMode");
         lua_pushstring(luaVM, EnumToString(dxStatus.testMode));
@@ -1712,8 +1721,44 @@ int CLuaDrawingDefs::DxGetStatus(lua_State* luaVM)
         lua_pushboolean(luaVM, dxStatus.settings.bHighDetailPeds);
         lua_settable(luaVM, -3);
 
+        lua_pushstring(luaVM, "SettingBlur");
+        lua_pushboolean(luaVM, dxStatus.settings.bBlur);
+        lua_settable(luaVM, -3);
+
+        lua_pushstring(luaVM, "SettingCoronaReflections");
+        lua_pushboolean(luaVM, dxStatus.settings.bCoronaReflections);
+        lua_settable(luaVM, -3);
+
+        lua_pushstring(luaVM, "SettingDynamicPedShadows");
+        lua_pushboolean(luaVM, dxStatus.settings.bDynamicPedShadows);
+        lua_settable(luaVM, -3);
+
         lua_pushstring(luaVM, "TotalPhysicalMemory");
         lua_pushnumber(luaVM, static_cast<lua_Number>(SharedUtil::GetWMITotalPhysicalMemory()) / 1024.0 / 1024.0);
+        lua_settable(luaVM, -3);
+
+        lua::Push(luaVM, "SettingDebugMode");
+        lua::Push(luaVM, [] {
+            switch (g_pCore->GetDiagnosticDebug())
+            {
+                case EDiagnosticDebug::GRAPHICS_6734:
+                    return "#6734 Graphics";
+                case EDiagnosticDebug::D3D_6732:
+                    return "#6732 D3D";
+                case EDiagnosticDebug::LOG_TIMING_0000:
+                    return "#0000 Log timing";
+                case EDiagnosticDebug::JOYSTICK_0000:
+                    return "#0000 Joystick";
+                case EDiagnosticDebug::LUA_TRACE_0000:
+                    return "#0000 Lua trace";
+                case EDiagnosticDebug::RESIZE_ALWAYS_0000:
+                    return "#0000 Resize always";
+                case EDiagnosticDebug::RESIZE_NEVER_0000:
+                    return "#0000 Resize never";
+                default:
+                    return "Default";
+            }
+        }());
         lua_settable(luaVM, -3);
 
         return 1;
@@ -1728,16 +1773,27 @@ int CLuaDrawingDefs::DxGetStatus(lua_State* luaVM)
 
 int CLuaDrawingDefs::DxGetTexturePixels(lua_State* luaVM)
 {
-    //  string dxGetTexturePixels( [ int surfaceIndex, ] element texture [, int x, int y, int width, int height ] )
-    CClientTexture* pTexture;
-    CVector2D       vecPosition;
-    CVector2D       vecSize;
-    int             surfaceIndex = 0;
+    //  string dxGetTexturePixels( [ int surfaceIndex, ] element texture [, string pixelsFormat = "plain" [, string textureFormat = "argb"] [, bool mipmaps = true]]
+    //                             [, int x, int y, int width, int height ] )
+    CClientTexture*   pTexture;
+    CVector2D         vecPosition;
+    CVector2D         vecSize;
+    int               surfaceIndex = 0;
+    EPixelsFormatType pixelsFormat = EPixelsFormat::PLAIN;
+    ERenderFormat     textureFormat = RFORMAT_UNKNOWN;
+    bool              bMipMaps = true;
 
     CScriptArgReader argStream(luaVM);
     if (argStream.NextIsNumber())
         argStream.ReadNumber(surfaceIndex);
     argStream.ReadUserData(pTexture);
+
+    if (argStream.NextIsEnumString(pixelsFormat))
+    {
+        argStream.ReadEnumString(pixelsFormat, EPixelsFormat::PLAIN);
+        argStream.ReadIfNextIsEnumString(textureFormat, RFORMAT_UNKNOWN);
+        argStream.ReadIfNextIsBool(bMipMaps, true);
+    }
 
     argStream.ReadVector2D(vecPosition, CVector2D());
     argStream.ReadVector2D(vecSize, CVector2D());
@@ -1749,8 +1805,8 @@ int CLuaDrawingDefs::DxGetTexturePixels(lua_State* luaVM)
         CPixels   pixels;
 
         // TODO: "height ? &rc : NULL" - height will always be set to 0 or another number! Why does this exist?
-        if (g_pCore->GetGraphics()->GetPixelsManager()->GetTexturePixels(pTexture->GetTextureItem()->m_pD3DTexture, pixels, vecSize.fY == 0 ? NULL : &rc,
-                                                                         surfaceIndex))
+        if (g_pCore->GetGraphics()->GetPixelsManager()->GetTexturePixels(pTexture->GetTextureItem()->m_pD3DTexture, pixels, pixelsFormat, textureFormat,
+                                                                         bMipMaps, vecSize.fY == 0 ? NULL : &rc, surfaceIndex))
         {
             lua_pushlstring(luaVM, pixels.GetData(), pixels.GetSize());
             return 1;
